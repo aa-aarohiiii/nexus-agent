@@ -107,16 +107,17 @@ Rules:
 - Keep every string concise. Output raw JSON only, nothing else.`;
 
 async function requestPlanFromClaude(promptBody) {
-  const res = await fetch("/api/plan", {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt: promptBody }),
+    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 2000, messages: [{ role: "user", content: promptBody }] }),
   });
-  if (!res.ok) throw new Error(`Planner request failed: ${res.status}`);
   const data = await res.json();
   const text = (data.content || []).map((b) => b.text || "").join("\n");
-  const clean = text.replace(/```json/gi, "").replace(/```/g, "").trim();
-  return JSON.parse(clean);
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end === -1 || end < start) throw new Error("No JSON object found in planner response");
+  return JSON.parse(text.slice(start, end + 1));
 }
 
 async function planForGoal(goal, clarificationAnswer) {
@@ -158,6 +159,7 @@ function fallbackPlan(goal) {
       { title: "Hotel booking attempt", tool: "Hotel Search", type: "action", detail: "Attempted to lock in the selected room for your dates." },
       { title: "Booking timeout", tool: "Hotel Search", type: "failure", detail: "Provider did not confirm availability within the expected window." },
       { title: "Retry with alternate source", tool: "Hotel Search", type: "replan", detail: "Re-queried a second inventory source and confirmed the same room." },
+      { title: "Ready to book", tool: "None", type: "approval_required", detail: "Flight and hotel selected within budget — awaiting your confirmation to book." },
       { title: "Build itinerary", tool: "Calendar", type: "action", detail: "Drafted a day-by-day itinerary with transit times." },
       { title: "Trip plan ready", tool: "None", type: "success", detail: "Full itinerary compiled and ready for review." },
     ],
@@ -169,6 +171,7 @@ function fallbackPlan(goal) {
       { title: "Verify stock", tool: "Product Search", type: "action", detail: "Checked live stock at the top-ranked retailer." },
       { title: "Stock error", tool: "Product Search", type: "failure", detail: "Top-ranked listing was out of stock at checkout." },
       { title: "Re-route to alternate seller", tool: "Product Search", type: "replan", detail: "Found the identical listing in stock at a second retailer." },
+      { title: "Ready to purchase", tool: "None", type: "approval_required", detail: "Best available option confirmed in stock — awaiting your confirmation to proceed." },
       { title: "Recommendation ready", tool: "None", type: "success", detail: "Final recommendation compiled with purchase link." },
     ],
     "event planning": [
@@ -180,6 +183,7 @@ function fallbackPlan(goal) {
       { title: "Venue hold request", tool: "Maps/Places", type: "action", detail: "Requested a hold on the selected date." },
       { title: "Hold request timeout", tool: "Maps/Places", type: "failure", detail: "Venue did not confirm the hold within the expected window." },
       { title: "Retry via alternate contact", tool: "Maps/Places", type: "replan", detail: "Reached the venue through a second contact channel and confirmed." },
+      { title: "Ready to confirm", tool: "None", type: "approval_required", detail: "Venue and catering selected within budget — awaiting your confirmation to lock it in." },
       { title: "Event plan ready", tool: "File Generator", type: "success", detail: "Compiled full checklist, timeline, and budget breakdown." },
     ],
     study: [
@@ -198,6 +202,7 @@ function fallbackPlan(goal) {
       { title: "Booking attempt", tool: "Restaurant Search", type: "action", detail: "Attempted to reserve a table for tonight." },
       { title: "No immediate slot", tool: "Restaurant Search", type: "failure", detail: "Preferred time slot was fully booked." },
       { title: "Retry nearby time slot", tool: "Restaurant Search", type: "replan", detail: "Secured a table 20 minutes later at the same restaurant." },
+      { title: "Ready to reserve", tool: "None", type: "approval_required", detail: "Table found matching your party size — awaiting your confirmation to book." },
       { title: "Reservation confirmed", tool: "None", type: "success", detail: "Table confirmed, details ready to share." },
     ],
     comparison: [
