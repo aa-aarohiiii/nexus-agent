@@ -107,11 +107,15 @@ Rules:
 - Keep every string concise. Output raw JSON only, nothing else.`;
 
 async function requestPlanFromClaude(promptBody) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch("/api/plan", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 2000, messages: [{ role: "user", content: promptBody }] }),
+    body: JSON.stringify({ prompt: promptBody }),
   });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(`Planner request failed (${res.status}): ${errBody.error || "unknown error"}`);
+  }
   const data = await res.json();
   const text = (data.content || []).map((b) => b.text || "").join("\n");
   const start = text.indexOf("{");
@@ -124,13 +128,13 @@ async function planForGoal(goal, clarificationAnswer) {
   let body = `${SCHEMA_PROMPT}\n\nUser goal: "${goal}"`;
   if (clarificationAnswer) body += `\n\nThe user answered your clarifying question with: "${clarificationAnswer}". Now produce the full plan — clarification_needed must be false this time.`;
   try { return { plan: await requestPlanFromClaude(body), fallback: false }; }
-  catch (e) { return { plan: fallbackPlan(goal), fallback: true }; }
+  catch (e) { console.error("NEXUS planner error, using offline fallback:", e); return { plan: fallbackPlan(goal), fallback: true }; }
 }
 
 async function planForModification(originalGoal, completedTitles, instruction) {
   const body = `${SCHEMA_PROMPT}\n\nThis is a REPLAN request, not a fresh task. Original goal: "${originalGoal}". Steps already completed and must NOT be repeated: ${completedTitles.join("; ") || "none yet"}. The user just said: "${instruction}". Generate ONLY the new/updated remaining steps needed to incorporate this change and finish the task (typically 3-7 steps), keeping prior constraints unless the instruction overrides them. clarification_needed should be false unless the instruction is genuinely ambiguous.`;
   try { return { plan: await requestPlanFromClaude(body), fallback: false }; }
-  catch (e) { return { plan: fallbackPlan(originalGoal + " " + instruction), fallback: true }; }
+  catch (e) { console.error("NEXUS replan error, using offline fallback:", e); return { plan: fallbackPlan(originalGoal + " " + instruction), fallback: true }; }
 }
 
 /* ---- local fallback planner (used only if the API call fails) ---- */
@@ -273,6 +277,15 @@ function useEngine() {
         return { ...t, status: "clarifying", clarificationQuestion: plan.clarification_question, category: plan.category_label || t.category };
       }
       const newSteps = normalizeSteps(plan.steps, nextStepId.current);
+      if (plan.approval_needed && !newSteps.some((s) => s.type === "approval_required")) {
+        const approvalStep = {
+          id: nextStepId.current + newSteps.length, title: "Ready to proceed", tool: "None", type: "approval_required",
+          detail: plan.approval_summary || "Awaiting your confirmation before proceeding.",
+          decisionReason: null, rejectedOption: null, status: "pending", startedAt: null, completedAt: null,
+        };
+        const insertAt = Math.max(0, newSteps.length - 1);
+        newSteps.splice(insertAt, 0, approvalStep);
+      }
       nextStepId.current += newSteps.length;
       const steps = appendMode ? [...t.steps, ...newSteps] : newSteps;
       return {
@@ -348,11 +361,19 @@ function useEngine() {
       const steps = task.steps.slice();
       const step = { ...steps[task.cursor] };
       if (approved) {
-        step.status = "done"; step.completedAt = Date.now(); steps[task.cursor] = step;
-        return { ...task, steps, cursor: task.cursor + 1, completedSteps: task.completedSteps + 1, status: "executing" };
+        step.status = "done"; step.completedAt = Date.now();
+        step.detail = "Booking successful — confirmed and finalized.";
+        steps[task.cursor] = step;
+        return {
+          ...task, steps, cursor: task.cursor + 1, completedSteps: task.completedSteps + 1, status: "executing",
+          toastMessage: "Booking successful ✓", toastTs: Date.now(),
+        };
       }
       step.status = "failed"; step.completedAt = Date.now(); steps[task.cursor] = step;
-      return { ...task, steps, status: "cancelled", stats: { ...task.stats, endTime: Date.now() } };
+      return {
+        ...task, steps, status: "cancelled", stats: { ...task.stats, endTime: Date.now() },
+        toastMessage: "Declined — no changes made", toastTs: Date.now(),
+      };
     }));
   }, []);
 
@@ -878,6 +899,25 @@ function GraphNode({ step }) {
   );
 }
 
+function Toast({ message }) {
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    setVisible(true);
+    const t = setTimeout(() => setVisible(false), 3200);
+    return () => clearTimeout(t);
+  }, [message]);
+  if (!message || !visible) return null;
+  return (
+    <div className="node-in font-body" style={{
+      position: "fixed", bottom: 26, left: "50%", transform: "translateX(-50%)", zIndex: 200,
+      background: C.black, color: "#fff", padding: "12px 22px", borderRadius: 999, display: "flex",
+      alignItems: "center", gap: 9, boxShadow: "0 24px 60px -22px rgba(24,22,17,0.6)", fontSize: 13, fontWeight: 700,
+    }}>
+      <CheckCircle2 size={16} color={C.green} /> {message}
+    </div>
+  );
+}
+
 function ApprovalDialog({ task, onApprove, onReject }) {
   if (!task || task.status !== "awaiting_approval" || !task.approval) return null;
   const itinerary = task.finalOutput && task.finalOutput.itinerary ? task.finalOutput.itinerary : [];
@@ -1094,6 +1134,7 @@ function TaskDetailView({ task, back, respondApproval, answerClarification, modi
         </div>
       </div>
       <ApprovalDialog task={task} onApprove={(id) => respondApproval(id, true)} onReject={(id) => respondApproval(id, false)} />
+      <Toast key={task.toastTs} message={task.toastMessage} />
     </div>
   );
 }
